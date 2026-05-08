@@ -79,6 +79,13 @@ BoTSORT::BoTSORT(const Config<TrackerParams> &tracker_config,
         _reid_enabled = false;
     }
 
+    // Cache the distance metric. If a ReID model was loaded, defer to it;
+    // otherwise default to "cosine" so callers supplying externally-computed
+    // embeddings (via the track-with-features overload) still get a sensible
+    // metric without needing the internal model.
+    _distance_metric =
+            _reid_model ? _reid_model->get_distance_metric() : "cosine";
+
     // Global motion compensation module
     if (_gmc_enabled && not_empty(gmc_config))
     {
@@ -101,7 +108,36 @@ BoTSORT::BoTSORT(const Config<TrackerParams> &tracker_config,
 std::vector<std::shared_ptr<Track>>
 BoTSORT::track(const std::vector<Detection> &detections, const cv::Mat &frame)
 {
+    // Delegate to the features-aware overload with an empty feature vector;
+    // it preserves the legacy behaviour (internal ReID extraction when
+    // _reid_enabled, motion-only otherwise).
+    return track(detections, std::vector<FeatureVector>{}, frame);
+}
+
+
+std::vector<std::shared_ptr<Track>>
+BoTSORT::track(const std::vector<Detection> &detections,
+               const std::vector<FeatureVector> &features,
+               const cv::Mat &frame)
+{
     PROFILE_FUNCTION();
+
+    // Validate parallel-array contract. Empty features is allowed and means
+    // "fall back to internal extraction or motion-only".
+    if (!features.empty() && features.size() != detections.size())
+    {
+        throw std::invalid_argument(
+                "BoTSORT::track: features.size() must equal "
+                "detections.size() when features are supplied");
+    }
+
+    // Appearance-aware association is enabled when either (a) the user has
+    // supplied externally-computed embeddings, or (b) the legacy internal
+    // ReID path is active. The TrackerParams::reid_enabled flag retains its
+    // original meaning: it gates internal extraction only.
+    const bool external_features = !features.empty();
+    const bool use_appearance = external_features || _reid_enabled;
+
     ////////////////// CREATE TRACK OBJECT FOR ALL THE DETECTIONS //////////////////
     // For all detections, extract features, create tracks and classify on the segregate of confidence
     _frame_id++;
@@ -113,9 +149,10 @@ BoTSORT::track(const std::vector<Detection> &detections, const cv::Mat &frame)
 
     if (!detections.empty())
     {
-        for (Detection &detection:
-             const_cast<std::vector<Detection> &>(detections))
+        for (size_t det_idx = 0; det_idx < detections.size(); ++det_idx)
         {
+            Detection &detection =
+                    const_cast<Detection &>(detections[det_idx]);
             detection.bbox_tlwh.x = std::max(0.0f, detection.bbox_tlwh.x);
             detection.bbox_tlwh.y = std::max(0.0f, detection.bbox_tlwh.y);
             detection.bbox_tlwh.width =
@@ -132,7 +169,15 @@ BoTSORT::track(const std::vector<Detection> &detections, const cv::Mat &frame)
 
             if (detection.confidence > _track_low_thresh)
             {
-                if (_reid_enabled)
+                if (external_features)
+                {
+                    // Use the caller-supplied embedding verbatim — no host
+                    // round-trip through cv::Mat, no internal model needed.
+                    tracklet = std::make_shared<Track>(
+                            tlwh, detection.confidence, detection.class_id,
+                            features[det_idx]);
+                }
+                else if (_reid_enabled)
                 {
                     FeatureVector embedding =
                             _extract_features(frame, detection.bbox_tlwh);
@@ -197,13 +242,14 @@ BoTSORT::track(const std::vector<Detection> &detections, const cv::Mat &frame)
     fuse_score(iou_dists,
                detections_high_conf);// Fuse the score with IoU distance
 
-    if (_reid_enabled)
+    if (use_appearance)
     {
-        // If re-ID is enabled, find the embedding distance between all tracked tracks and high confidence detections
+        // If appearance-aware association is enabled (either via internal
+        // ReID or externally-supplied embeddings), find the embedding
+        // distance between all tracked tracks and high confidence detections
         std::tie(raw_emd_dist, emd_dist_mask_1st_association) =
                 embedding_distance(tracks_pool, detections_high_conf,
-                                   _appearance_thresh,
-                                   _reid_model->get_distance_metric());
+                                   _appearance_thresh, _distance_metric);
         fuse_motion(*_kalman_filter, raw_emd_dist, tracks_pool,
                     detections_high_conf,
                     _lambda);// Fuse the motion with embedding distance
@@ -321,14 +367,13 @@ BoTSORT::track(const std::vector<Detection> &detections, const cv::Mat &frame)
     fuse_score(iou_dists_unconfirmed,
                unmatched_detections_after_1st_association);
 
-    if (_reid_enabled)
+    if (use_appearance)
     {
         // Find embedding distance between unconfirmed tracks and high confidence detections left after the first association
         std::tie(raw_emd_dist_unconfirmed, emd_dist_mask_unconfirmed) =
                 embedding_distance(unconfirmed_tracks,
                                    unmatched_detections_after_1st_association,
-                                   _appearance_thresh,
-                                   _reid_model->get_distance_metric());
+                                   _appearance_thresh, _distance_metric);
         fuse_motion(*_kalman_filter, raw_emd_dist_unconfirmed,
                     unconfirmed_tracks,
                     unmatched_detections_after_1st_association, _lambda);

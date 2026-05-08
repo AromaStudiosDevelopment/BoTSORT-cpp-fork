@@ -26,13 +26,40 @@ public:
 
     /**
      * @brief Track the objects in the frame
-     * 
+     *
      * @param detections Detections in the frame
      * @param frame Frame
-     * @return std::vector<std::shared_ptr<Track>> 
+     * @return std::vector<std::shared_ptr<Track>>
      */
     std::vector<std::shared_ptr<Track>>
     track(const std::vector<Detection> &detections, const cv::Mat &frame);
+
+
+    /**
+     * @brief Track the objects in the frame using pre-computed appearance
+     *        embeddings supplied by an external Re-ID stage.
+     *
+     * The supplied features are treated as parallel to @p detections — i.e.
+     * @c features[i] is the embedding for @c detections[i]. When @p features
+     * is non-empty, appearance-aware association is enabled regardless of
+     * the @c TrackerParams::reid_enabled flag (and regardless of whether an
+     * internal Re-ID model was successfully loaded). When @p features is
+     * empty, behaviour matches the (detections, frame) overload: internal
+     * extraction runs only if Re-ID was configured + loaded; otherwise
+     * motion-only tracking is performed.
+     *
+     * @param detections Detections in the frame.
+     * @param features   Pre-computed embeddings, parallel to @p detections.
+     *                   Pass an empty vector to fall back to internal Re-ID
+     *                   (or motion-only tracking when Re-ID is disabled).
+     * @param frame      Frame; used for clipping bbox extents and GMC.
+     * @return Active tracks for this frame.
+     * @throws std::invalid_argument if @p features is non-empty but its
+     *         size differs from @p detections.size().
+     */
+    std::vector<std::shared_ptr<Track>>
+    track(const std::vector<Detection> &detections,
+          const std::vector<FeatureVector> &features, const cv::Mat &frame);
 
 
 private:
@@ -95,6 +122,10 @@ private:
 
 private:
     std::string _gmc_method_name;
+    // Distance metric used for embedding-based association. Populated from
+    // the loaded ReID model (if any) at construction; otherwise defaults to
+    // "cosine" so externally-supplied embeddings still have a metric to use.
+    std::string _distance_metric;
     bool _reid_enabled, _gmc_enabled;
     uint8_t _track_buffer, _frame_rate, _buffer_size, _max_time_lost;
     float _track_high_thresh, _track_low_thresh, _new_track_thresh,
