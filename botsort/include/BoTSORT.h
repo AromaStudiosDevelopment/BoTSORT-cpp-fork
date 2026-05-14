@@ -62,6 +62,26 @@ public:
           const std::vector<FeatureVector> &features, const cv::Mat &frame);
 
 
+    /**
+     * @brief Toggle GMC (Global Motion Compensation) at runtime.
+     *
+     * Callers can flip the per-frame CMC step on or off between successive
+     * calls to @ref track. Setting @p enabled=true is a no-op when the GMC
+     * algorithm was never constructed (i.e. the tracker was built without a
+     * GMC config), so the call is always safe.
+     *
+     * Intended use: adaptive skipping of CMC on stable broadcast scenes —
+     * see TrackerModule's adaptive-CMC gate. The next @ref track call
+     * honours the new state immediately; previously-applied homographies
+     * stay reflected in the existing Kalman state.
+     */
+    void set_gmc_enabled(bool enabled) noexcept;
+
+    /// Current state of the GMC gate. Useful for the host pipeline's
+    /// metrics / introspection paths.
+    [[nodiscard]] bool gmc_enabled() const noexcept { return _gmc_enabled; }
+
+
 private:
     /**
      * @brief Extract visual features from the given frame and bounding box

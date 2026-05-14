@@ -488,6 +488,19 @@ BoTSORT::track(const std::vector<Detection> &detections,
 }
 
 
+void BoTSORT::set_gmc_enabled(bool enabled) noexcept
+{
+    // Guard against re-enabling GMC when no algorithm was constructed —
+    // _gmc_algo->apply() would crash. Construction-time absence of GMC
+    // (gmc_config empty) means the caller cannot opt back in mid-run.
+    if (enabled && !_gmc_algo)
+    {
+        return;
+    }
+    _gmc_enabled = enabled;
+}
+
+
 FeatureVector BoTSORT::_extract_features(const cv::Mat &frame,
                                          const cv::Rect_<float> &bbox_tlwh)
 {
