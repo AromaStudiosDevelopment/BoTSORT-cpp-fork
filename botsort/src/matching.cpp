@@ -201,6 +201,28 @@ void fuse_motion_pitch(
 
     constexpr float kGateThreshold = bot_kalman::PitchKalmanFilter::chi2inv95;
 
+    // Collect the valid metre measurements ONCE (and remember their column
+    // indices), then call gating_distance once per track. This drops the
+    // Cholesky decomposition count from O(tracks x dets) to O(tracks),
+    // mirroring the batched pattern used by fuse_motion() above.
+    std::vector<bot_kalman::PKFMeasVec> valid_meas;
+    std::vector<Eigen::Index> valid_cols;
+    valid_meas.reserve(metre_measurements.size());
+    valid_cols.reserve(metre_measurements.size());
+    for (Eigen::Index j = 0;
+         j < static_cast<Eigen::Index>(detections.size()); ++j)
+    {
+        if (metre_measurements[j].has_value())
+        {
+            valid_meas.push_back(metre_measurements[j].value());
+            valid_cols.push_back(j);
+        }
+    }
+    if (valid_meas.empty())
+    {
+        return;
+    }
+
     for (Eigen::Index i = 0;
          i < static_cast<Eigen::Index>(tracks.size()); ++i)
     {
@@ -208,25 +230,18 @@ void fuse_motion_pitch(
         {
             continue;
         }
-        for (Eigen::Index j = 0;
-             j < static_cast<Eigen::Index>(detections.size()); ++j)
+        // ONE gating_distance call per track (one project() + Cholesky),
+        // batched across all valid metre measurements for this frame.
+        auto dists = pitch_kf.gating_distance(
+                tracks[i]->pitch_mean(),
+                tracks[i]->pitch_covariance(),
+                valid_meas);
+        for (Eigen::Index k = 0; k < dists.size(); ++k)
         {
-            if (!metre_measurements[j].has_value())
+            if (dists(k) > kGateThreshold)
             {
-                continue;
-            }
-            // gating_distance takes a vector of candidates; we pass a single
-            // probe per (track, det) cell because the metre KF doesn't
-            // batch across track rows.
-            std::vector<bot_kalman::PKFMeasVec> probe{
-                    metre_measurements[j].value()};
-            auto dists = pitch_kf.gating_distance(
-                    tracks[i]->pitch_mean(),
-                    tracks[i]->pitch_covariance(),
-                    probe);
-            if (dists(0, 0) > kGateThreshold)
-            {
-                cost_matrix(i, j) = std::numeric_limits<float>::infinity();
+                cost_matrix(i, valid_cols[k]) =
+                        std::numeric_limits<float>::infinity();
             }
             // Else leave the upstream pixel gate's decision unchanged.
         }

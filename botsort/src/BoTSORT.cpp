@@ -166,12 +166,17 @@ BoTSORT::track(const std::vector<Detection> &detections,
     }
     // Stash for the duration of this _track_impl call. We use a raw pointer
     // because std::vector<std::optional<...>> isn't trivially copyable on
-    // the hot path; cleared immediately after so subsequent calls without
-    // metre measurements aren't accidentally affected.
+    // the hot path; an RAII guard clears it on ALL exit paths (including
+    // exceptions from _track_impl) so subsequent track() calls that never
+    // set the pointer don't dereference a popped stack frame.
+    struct MetreStashGuard
+    {
+        BoTSORT *self;
+        ~MetreStashGuard() { self->_frame_metre_measurements = nullptr; }
+    };
     _frame_metre_measurements = &metre_measurements;
-    auto out = _track_impl(detections, features, frame, &H);
-    _frame_metre_measurements = nullptr;
-    return out;
+    MetreStashGuard guard{this};
+    return _track_impl(detections, features, frame, &H);
 }
 
 
