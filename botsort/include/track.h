@@ -146,10 +146,12 @@ public:
     void update(KalmanFilter &kalman_filter, Track &new_track,
                 uint32_t frame_id);
 
-    /// Phase E.2: activate the metre-space Kalman from a pitch-projected
-    /// foot-point measurement. No-op if the metre state was already
-    /// initialized (use `update_pitch` instead).
-    void activate_pitch(PitchKalmanFilter& pitch_kf,
+    /// Phase E.2: initialize (or re-initialize) the metre-space Kalman
+    /// from a pitch-projected foot-point measurement. Always overwrites
+    /// any existing metre state and marks the track as metre-initialized;
+    /// callers who only want to seed when empty should use `update_pitch`,
+    /// which lazy-activates on first use.
+    void activate_pitch(const PitchKalmanFilter& pitch_kf,
                         const bot_kalman::PKFMeasVec& measurement);
 
     /// Phase E.2: constant-velocity predict on the metre state. Caller
@@ -158,7 +160,7 @@ public:
 
     /// Phase E.2: Kalman update on the metre state from a pitch-projected
     /// foot-point measurement. Lazily activates if not yet initialized.
-    void update_pitch(PitchKalmanFilter& pitch_kf,
+    void update_pitch(const PitchKalmanFilter& pitch_kf,
                       const bot_kalman::PKFMeasVec& measurement);
 
     /// Phase E.2: read-only accessor for the gate logic in BoTSORT.
