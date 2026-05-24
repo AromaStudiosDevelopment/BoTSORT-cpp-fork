@@ -1,10 +1,13 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "GlobalMotionCompensation.h"
 #include "GmcParams.h"
+#include "PitchKalmanFilter.h"
 #include "ReID.h"
 #include "ReIDParams.h"
 #include "TrackerParams.h"
@@ -16,10 +19,19 @@ using Config = std::variant<T, std::string, std::monostate>;
 class BoTSORT
 {
 public:
+    /// Phase E.2 (OpticXI): optional metre-space Kalman state per track. When
+    /// pitch_kalman_enabled = true, callers may pass per-detection metre
+    /// foot-point measurements via the new track() overload below; tracks
+    /// then run a parallel 4-D Kalman whose Mahalanobis distance tightens
+    /// the gate for that track-pair. When disabled (default) BoTSORT
+    /// behavior is bit-identical to pre-E.2.
     explicit BoTSORT(const Config<TrackerParams> &tracker_config,
                      const Config<GMC_Params> &gmc_config = {},
                      const Config<ReIDParams> &reid_config = {},
-                     const std::string &reid_onnx_model_path = "");
+                     const std::string &reid_onnx_model_path = "",
+                     bool pitch_kalman_enabled = false,
+                     float pitch_kf_std_weight_position_m = 0.1F,
+                     float pitch_kf_std_weight_velocity_m = 0.5F);
 
     ~BoTSORT() = default;
 
@@ -87,6 +99,29 @@ public:
           const std::vector<FeatureVector> &features,
           const cv::Mat &frame,
           const HomographyMatrix &H);
+
+
+    /**
+     * @brief Phase E.2 (OpticXI) — track using embeddings + caller-supplied GMC
+     *        homography + optional per-detection metre foot-points.
+     *
+     * Identical to the 3-arg (detections, features, frame, H) overload
+     * but also accepts a parallel std::optional metre measurement per
+     * detection. Entries where the optional is engaged feed the metre
+     * Kalman gate (an additive tightening on top of the pixel gate);
+     * std::nullopt entries leave the pixel gate's decision unchanged for
+     * that (track, detection) pair. An empty metre_measurements vector
+     * means "metre path off this frame" — equivalent to all-nullopt.
+     *
+     * @throws std::invalid_argument if metre_measurements is non-empty
+     *         AND its size differs from detections.size().
+     */
+    std::vector<std::shared_ptr<Track>>
+    track(const std::vector<Detection> &detections,
+          const std::vector<FeatureVector> &features,
+          const cv::Mat &frame,
+          const HomographyMatrix &H,
+          const std::vector<std::optional<bot_kalman::PKFMeasVec>>& metre_measurements);
 
 
     /**
@@ -198,6 +233,11 @@ private:
     std::vector<std::shared_ptr<Track>> _lost_tracks;
 
     std::unique_ptr<KalmanFilter> _kalman_filter;
+    // Phase E.2 — metre-space Kalman, optional (gated by _pitch_kalman_enabled).
+    bool _pitch_kalman_enabled{false};
+    std::unique_ptr<PitchKalmanFilter> _pitch_kalman_filter;
+    // Stashed for the per-frame _track_impl pass; non-owning, cleared each frame.
+    const std::vector<std::optional<bot_kalman::PKFMeasVec>>* _frame_metre_measurements{nullptr};
     std::unique_ptr<GlobalMotionCompensation> _gmc_algo;
     std::unique_ptr<ReIDModel> _reid_model;
 };

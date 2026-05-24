@@ -50,7 +50,10 @@ T fetch_config(const Config<T> &config,
 BoTSORT::BoTSORT(const Config<TrackerParams> &tracker_config,
                  const Config<GMC_Params> &gmc_config,
                  const Config<ReIDParams> &reid_config,
-                 const std::string &reid_onnx_model_path)
+                 const std::string &reid_onnx_model_path,
+                 bool pitch_kalman_enabled,
+                 float pitch_kf_std_weight_position_m,
+                 float pitch_kf_std_weight_velocity_m)
 {
     auto tracker_params = fetch_config<TrackerParams>(
             tracker_config, TrackerParams::load_config);
@@ -62,6 +65,17 @@ BoTSORT::BoTSORT(const Config<TrackerParams> &tracker_config,
     _max_time_lost = _buffer_size;
     _kalman_filter = std::make_unique<KalmanFilter>(
             static_cast<double>(1.0 / _frame_rate));
+
+    // Phase E.2 — metre-space Kalman, optional. When disabled the rest of
+    // _track_impl bypasses every metre code path (see pitch_pass_active),
+    // making behavior bit-identical to pre-E.2.
+    _pitch_kalman_enabled = pitch_kalman_enabled;
+    if (_pitch_kalman_enabled) {
+        const float dt = 1.0F / static_cast<float>(_frame_rate);
+        _pitch_kalman_filter = std::make_unique<PitchKalmanFilter>(
+                dt, pitch_kf_std_weight_position_m,
+                pitch_kf_std_weight_velocity_m);
+    }
 
 
     // Re-ID module, load visual feature extractor here
@@ -134,6 +148,34 @@ BoTSORT::track(const std::vector<Detection> &detections,
 
 
 std::vector<std::shared_ptr<Track>>
+BoTSORT::track(const std::vector<Detection> &detections,
+               const std::vector<FeatureVector> &features,
+               const cv::Mat &frame, const HomographyMatrix &H,
+               const std::vector<std::optional<bot_kalman::PKFMeasVec>>&
+                       metre_measurements)
+{
+    // Validate parallel-array contract. An empty metre_measurements vector
+    // means "metre path off this frame" and is always permitted; a non-empty
+    // vector must be 1:1 with detections (same indexing).
+    if (!metre_measurements.empty() &&
+        metre_measurements.size() != detections.size())
+    {
+        throw std::invalid_argument(
+                "BoTSORT::track — metre_measurements size mismatch with "
+                "detections");
+    }
+    // Stash for the duration of this _track_impl call. We use a raw pointer
+    // because std::vector<std::optional<...>> isn't trivially copyable on
+    // the hot path; cleared immediately after so subsequent calls without
+    // metre measurements aren't accidentally affected.
+    _frame_metre_measurements = &metre_measurements;
+    auto out = _track_impl(detections, features, frame, &H);
+    _frame_metre_measurements = nullptr;
+    return out;
+}
+
+
+std::vector<std::shared_ptr<Track>>
 BoTSORT::_track_impl(const std::vector<Detection> &detections,
                      const std::vector<FeatureVector> &features,
                      const cv::Mat &frame,
@@ -165,6 +207,19 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
             detections_low_conf;
     detections_low_conf.reserve(detections.size()),
             detections_high_conf.reserve(detections.size());
+
+    // Phase E.2 — parallel metre-measurement subsets that match the
+    // high-conf / low-conf detection vectors index-for-index. We populate
+    // them in the same pass as the detection split so the column ordering
+    // stays in lock-step with the cost matrices later on.
+    const bool have_metre = (_frame_metre_measurements != nullptr) &&
+                            !_frame_metre_measurements->empty();
+    std::vector<std::optional<bot_kalman::PKFMeasVec>>
+            metre_meas_high_conf, metre_meas_low_conf;
+    if (have_metre) {
+        metre_meas_high_conf.reserve(detections.size());
+        metre_meas_low_conf.reserve(detections.size());
+    }
 
     if (!detections.empty())
     {
@@ -209,9 +264,21 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
                             tlwh, detection.confidence, detection.class_id);
 
                 if (detection.confidence >= _track_high_thresh)
+                {
                     detections_high_conf.push_back(tracklet);
+                    if (have_metre) {
+                        metre_meas_high_conf.push_back(
+                                (*_frame_metre_measurements)[det_idx]);
+                    }
+                }
                 else
+                {
                     detections_low_conf.push_back(tracklet);
+                    if (have_metre) {
+                        metre_meas_low_conf.push_back(
+                                (*_frame_metre_measurements)[det_idx]);
+                    }
+                }
             }
         }
     }
@@ -239,6 +306,22 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
 
     // Predict the location of the tracks with KF (even for lost tracks)
     Track::multi_predict(tracks_pool, *_kalman_filter);
+
+    // Phase E.2 — predict metre-space state for tracks that have it initialized.
+    // Skipped entirely when pitch_kalman is disabled OR when this frame has no
+    // metre measurements (host's homography invalid). The bool is computed
+    // here once and reused by every subsequent metre code path so the
+    // disabled path is bit-identical to pre-E.2.
+    const bool pitch_pass_active = _pitch_kalman_enabled &&
+                                   _pitch_kalman_filter &&
+                                   have_metre;
+    if (pitch_pass_active) {
+        for (auto& track_ptr : tracks_pool) {
+            if (track_ptr->pitch_kf_initialized()) {
+                track_ptr->predict_pitch(*_pitch_kalman_filter);
+            }
+        }
+    }
 
     // Apply camera motion compensation. When the caller supplied a homography
     // (e.g. one upstream GMC pass shared by multiple BoTSORT instances), use
@@ -282,6 +365,21 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
                     _lambda);// Fuse the motion with embedding distance
     }
 
+    if (pitch_pass_active) {
+        // Phase E.2 — additive metre Mahalanobis tightening on the cost
+        // matrices feeding the 1st association. We tighten BOTH the
+        // appearance-side matrix (only relevant when use_appearance) and the
+        // IoU matrix so the metre gate isn't bypassed for (track, det) pairs
+        // that the appearance branch never visits.
+        if (use_appearance) {
+            fuse_motion_pitch(*_pitch_kalman_filter, raw_emd_dist,
+                              tracks_pool, detections_high_conf,
+                              metre_meas_high_conf);
+        }
+        fuse_motion_pitch(*_pitch_kalman_filter, iou_dists, tracks_pool,
+                          detections_high_conf, metre_meas_high_conf);
+    }
+
     // Fuse the IoU distance and embedding distance to get the final distance matrix
     CostMatrix distances_first_association = fuse_iou_with_emb(
             iou_dists, raw_emd_dist, iou_dists_mask_1st_association,
@@ -311,6 +409,16 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
             track->re_activate(*_kalman_filter, *detection, _frame_id, false);
             refind_tracks.push_back(track);
         }
+
+        // Phase E.2 — keep metre-space state in lock-step with the pixel KF.
+        // update_pitch lazily activates on first use, so no explicit
+        // activate_pitch branch needed for re-activations either.
+        if (pitch_pass_active) {
+            const auto& maybe_metre = metre_meas_high_conf[match.second];
+            if (maybe_metre.has_value()) {
+                track->update_pitch(*_pitch_kalman_filter, maybe_metre.value());
+            }
+        }
     }
     ////////////////// First association, with high score detection boxes //////////////////
 
@@ -331,6 +439,16 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
     CostMatrix iou_dists_second;
     iou_dists_second = iou_distance(unmatched_tracks_after_1st_association,
                                     detections_low_conf);
+
+    if (pitch_pass_active) {
+        // Phase E.2 — tighten the 2nd-association IoU matrix with the metre
+        // gate. The 2nd association doesn't run fuse_motion at all (pixel KF
+        // gating is skipped here in the original code); metre gate is the
+        // only Mahalanobis check on this branch.
+        fuse_motion_pitch(*_pitch_kalman_filter, iou_dists_second,
+                          unmatched_tracks_after_1st_association,
+                          detections_low_conf, metre_meas_low_conf);
+    }
 
     // Perform linear assignment on the distance matrix, LAPJV algorithm is used here
     AssociationData second_associations =
@@ -357,6 +475,14 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
             track->re_activate(*_kalman_filter, *detection, _frame_id, false);
             refind_tracks.push_back(track);
         }
+
+        // Phase E.2 — metre update for the 2nd-association branch.
+        if (pitch_pass_active) {
+            const auto& maybe_metre = metre_meas_low_conf[match.second];
+            if (maybe_metre.has_value()) {
+                track->update_pitch(*_pitch_kalman_filter, maybe_metre.value());
+            }
+        }
     }
 
     // The tracks that are not associated with any detection even after the second association are marked as lost
@@ -377,11 +503,24 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
     ////////////////// Deal with unconfirmed tracks //////////////////
     std::vector<std::shared_ptr<Track>>
             unmatched_detections_after_1st_association;
+    // Phase E.2 — parallel metre vec for the unconfirmed pass; sourced from
+    // metre_meas_high_conf at the same indices used to build the detection
+    // subset above so column ordering matches the cost matrices.
+    std::vector<std::optional<bot_kalman::PKFMeasVec>>
+            metre_meas_unmatched_high_conf;
+    if (pitch_pass_active) {
+        metre_meas_unmatched_high_conf.reserve(
+                first_associations.unmatched_det_indices.size());
+    }
     for (int detection_idx: first_associations.unmatched_det_indices)
     {
         const std::shared_ptr<Track> &detection =
                 detections_high_conf[detection_idx];
         unmatched_detections_after_1st_association.push_back(detection);
+        if (pitch_pass_active) {
+            metre_meas_unmatched_high_conf.push_back(
+                    metre_meas_high_conf[detection_idx]);
+        }
     }
 
     //Find IoU distance between unconfirmed tracks and high confidence detections left after the first association
@@ -406,6 +545,23 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
                     unmatched_detections_after_1st_association, _lambda);
     }
 
+    if (pitch_pass_active) {
+        // Phase E.2 — additive metre Mahalanobis tightening on the
+        // unconfirmed-tracks association. Same rationale as the 1st
+        // association: tighten both the appearance (when present) and
+        // IoU matrices.
+        if (use_appearance) {
+            fuse_motion_pitch(*_pitch_kalman_filter, raw_emd_dist_unconfirmed,
+                              unconfirmed_tracks,
+                              unmatched_detections_after_1st_association,
+                              metre_meas_unmatched_high_conf);
+        }
+        fuse_motion_pitch(*_pitch_kalman_filter, iou_dists_unconfirmed,
+                          unconfirmed_tracks,
+                          unmatched_detections_after_1st_association,
+                          metre_meas_unmatched_high_conf);
+    }
+
     // Fuse the IoU distance and the embedding distance
     CostMatrix distances_unconfirmed = fuse_iou_with_emb(
             iou_dists_unconfirmed, raw_emd_dist_unconfirmed,
@@ -425,6 +581,15 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
         // and add the track to the activated tracks list
         track->update(*_kalman_filter, *detection, _frame_id);
         activated_tracks.push_back(track);
+
+        // Phase E.2 — metre update for the unconfirmed-track branch.
+        if (pitch_pass_active) {
+            const auto& maybe_metre =
+                    metre_meas_unmatched_high_conf[match.second];
+            if (maybe_metre.has_value()) {
+                track->update_pitch(*_pitch_kalman_filter, maybe_metre.value());
+            }
+        }
     }
 
     // All the unconfirmed tracks that are not associated with any detection are marked as removed
@@ -442,21 +607,46 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
 
     ////////////////// Initialize new tracks //////////////////
     std::vector<std::shared_ptr<Track>> unmatched_high_conf_detections;
+    // Phase E.2 — parallel metre vec for newly-born tracks.
+    std::vector<std::optional<bot_kalman::PKFMeasVec>>
+            metre_meas_new_tracks;
+    if (pitch_pass_active) {
+        metre_meas_new_tracks.reserve(
+                unconfirmed_associations.unmatched_det_indices.size());
+    }
     for (int detection_idx: unconfirmed_associations.unmatched_det_indices)
     {
         const std::shared_ptr<Track> &detection =
                 unmatched_detections_after_1st_association[detection_idx];
         unmatched_high_conf_detections.push_back(detection);
+        if (pitch_pass_active) {
+            metre_meas_new_tracks.push_back(
+                    metre_meas_unmatched_high_conf[detection_idx]);
+        }
     }
 
     // Initialize new tracks for the high confidence detections left after all the associations
-    for (const std::shared_ptr<Track> &detection:
-         unmatched_high_conf_detections)
+    for (size_t new_idx = 0;
+         new_idx < unmatched_high_conf_detections.size(); ++new_idx)
     {
+        const std::shared_ptr<Track> &detection =
+                unmatched_high_conf_detections[new_idx];
         if (detection->get_score() >= _new_track_thresh)
         {
             detection->activate(*_kalman_filter, _frame_id);
             activated_tracks.push_back(detection);
+
+            // Phase E.2 — seed metre state on newborn tracks when the host
+            // provided a metre measurement. update_pitch lazy-activates with
+            // velocity = 0, so the second frame's predict gives a sensible
+            // prior even without an explicit activate_pitch call.
+            if (pitch_pass_active) {
+                const auto& maybe_metre = metre_meas_new_tracks[new_idx];
+                if (maybe_metre.has_value()) {
+                    detection->update_pitch(*_pitch_kalman_filter,
+                                            maybe_metre.value());
+                }
+            }
         }
     }
     ////////////////// Initialize new tracks //////////////////
