@@ -143,6 +143,12 @@ public:
     /// metrics / introspection paths.
     [[nodiscard]] bool gmc_enabled() const noexcept { return _gmc_enabled; }
 
+    /// Current frame counter (monotonic, 1-based after the first track() call).
+    /// Exposed so the host pipeline can compute per-track lost-duration
+    /// (`frame_id() - track->frame_id`) for downstream consumers like the
+    /// E.3 ROI module that need to know how long a Lost track has been gone.
+    [[nodiscard]] unsigned int frame_id() const noexcept { return _frame_id; }
+
 
 private:
     /**
