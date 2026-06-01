@@ -63,6 +63,33 @@ public:
 
 
     /**
+     * @brief Track using pre-computed embeddings AND a caller-supplied
+     *        camera-motion homography.
+     *
+     * Identical to the (detections, features, frame) overload, but the
+     * internal GMC pass is bypassed and the supplied @p H is applied to
+     * every confirmed/lost track instead. Designed for use by hosts that
+     * run a single shared GMC pass upstream and dispatch detections to
+     * multiple BoTSORT instances per frame (e.g. PerClassTrackerBank).
+     *
+     * @param detections Detections in the frame.
+     * @param features   Pre-computed embeddings parallel to @p detections.
+     *                   Pass an empty vector for motion-only association.
+     * @param frame      Frame; used for bbox clipping. GMC is NOT computed
+     *                   from this frame — @p H is used directly.
+     * @param H          Pre-computed homography mapping the prior frame's
+     *                   camera plane into the current frame's. Pass an
+     *                   identity matrix to short-circuit motion application
+     *                   (equivalent to set_gmc_enabled(false) for one frame).
+     */
+    std::vector<std::shared_ptr<Track>>
+    track(const std::vector<Detection> &detections,
+          const std::vector<FeatureVector> &features,
+          const cv::Mat &frame,
+          const HomographyMatrix &H);
+
+
+    /**
      * @brief Toggle GMC (Global Motion Compensation) at runtime.
      *
      * Callers can flip the per-frame CMC step on or off between successive
@@ -84,8 +111,23 @@ public:
 
 private:
     /**
+     * @brief Shared implementation for the (detections, features, frame)
+     *        and (detections, features, frame, H) overloads.
+     *
+     * When @p precomputed_H is non-null, the internal GMC pass is skipped
+     * and the supplied homography is applied to both the tracks pool and
+     * the unconfirmed tracks. When @p precomputed_H is null, the existing
+     * GMC behaviour applies (gated by @ref _gmc_enabled).
+     */
+    std::vector<std::shared_ptr<Track>>
+    _track_impl(const std::vector<Detection> &detections,
+                const std::vector<FeatureVector> &features,
+                const cv::Mat &frame,
+                const HomographyMatrix *precomputed_H);
+
+    /**
      * @brief Extract visual features from the given frame and bounding box
-     * 
+     *
      * @param frame Input frame
      * @param bbox_tlwh Bounding box (top, left, width, height)
      * @return FeatureVector Extracted visual features

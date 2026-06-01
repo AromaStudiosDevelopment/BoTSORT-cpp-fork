@@ -120,6 +120,25 @@ BoTSORT::track(const std::vector<Detection> &detections,
                const std::vector<FeatureVector> &features,
                const cv::Mat &frame)
 {
+    return _track_impl(detections, features, frame, nullptr);
+}
+
+
+std::vector<std::shared_ptr<Track>>
+BoTSORT::track(const std::vector<Detection> &detections,
+               const std::vector<FeatureVector> &features,
+               const cv::Mat &frame, const HomographyMatrix &H)
+{
+    return _track_impl(detections, features, frame, &H);
+}
+
+
+std::vector<std::shared_ptr<Track>>
+BoTSORT::_track_impl(const std::vector<Detection> &detections,
+                     const std::vector<FeatureVector> &features,
+                     const cv::Mat &frame,
+                     const HomographyMatrix *precomputed_H)
+{
     PROFILE_FUNCTION();
 
     // Validate parallel-array contract. Empty features is allowed and means
@@ -221,8 +240,16 @@ BoTSORT::track(const std::vector<Detection> &detections,
     // Predict the location of the tracks with KF (even for lost tracks)
     Track::multi_predict(tracks_pool, *_kalman_filter);
 
-    // Estimate camera motion and apply camera motion compensation
-    if (_gmc_enabled)
+    // Apply camera motion compensation. When the caller supplied a homography
+    // (e.g. one upstream GMC pass shared by multiple BoTSORT instances), use
+    // it verbatim and skip the internal _gmc_algo->apply() call entirely.
+    // Otherwise honour _gmc_enabled and compute it ourselves.
+    if (precomputed_H != nullptr)
+    {
+        Track::multi_gmc(tracks_pool, *precomputed_H);
+        Track::multi_gmc(unconfirmed_tracks, *precomputed_H);
+    }
+    else if (_gmc_enabled)
     {
         HomographyMatrix H = _gmc_algo->apply(frame, detections);
         Track::multi_gmc(tracks_pool, H);
