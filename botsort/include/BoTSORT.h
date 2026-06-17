@@ -230,7 +230,8 @@ private:
     // "cosine" so externally-supplied embeddings still have a metric to use.
     std::string _distance_metric;
     bool _reid_enabled, _gmc_enabled;
-    uint8_t _track_buffer, _frame_rate, _buffer_size, _max_time_lost;
+    uint8_t _track_buffer, _frame_rate;
+    int     _buffer_size, _max_time_lost;
     float _track_high_thresh, _track_low_thresh, _new_track_thresh,
             _match_thresh, _proximity_thresh, _appearance_thresh, _lambda;
     unsigned int _frame_id;
