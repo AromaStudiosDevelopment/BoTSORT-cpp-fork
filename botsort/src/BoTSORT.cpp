@@ -845,6 +845,7 @@ void BoTSORT::_load_params_from_config(const TrackerParams &config)
     _match_thresh = config.match_thresh;
     _proximity_thresh = config.proximity_thresh;
     _appearance_thresh = config.appearance_thresh;
+    _n_init = config.n_init;
     _gmc_method_name = config.gmc_method_name;
     _frame_rate = config.frame_rate;
     _lambda = config.lambda;
