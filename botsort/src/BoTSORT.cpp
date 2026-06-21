@@ -604,8 +604,18 @@ BoTSORT::_track_impl(const std::vector<Detection> &detections,
     {
         const std::shared_ptr<Track> &track =
                 unconfirmed_tracks[unmatched_track_index];
-        track->mark_removed();
-        removed_tracks.push_back(track);
+        // Confirmation grace: give a newborn track up to _n_init frames to
+        // confirm before deleting it, so a player missed by association for a
+        // frame or two keeps the same id instead of re-spawning a new one. A
+        // kept track stays in _tracked_tracks (its state is Tracked), is
+        // predicted forward by its Kalman filter, and stays eligible for the
+        // stage-3 (unconfirmed) association next frame.
+        if (_frame_id - track->start_frame >=
+            static_cast<uint32_t>(_n_init))
+        {
+            track->mark_removed();
+            removed_tracks.push_back(track);
+        }
     }
     ////////////////// Deal with unconfirmed tracks //////////////////
 
@@ -845,6 +855,7 @@ void BoTSORT::_load_params_from_config(const TrackerParams &config)
     _match_thresh = config.match_thresh;
     _proximity_thresh = config.proximity_thresh;
     _appearance_thresh = config.appearance_thresh;
+    _n_init = config.n_init;
     _gmc_method_name = config.gmc_method_name;
     _frame_rate = config.frame_rate;
     _lambda = config.lambda;
