@@ -10,16 +10,23 @@ Track::Track(std::vector<float> tlwh, float score, uint8_t class_id,
       tracklet_len(0), is_activated(false), state(TrackState::New)
 {
 
+    // Both branches share the ctor's feat_history_size bound. A track born
+    // without a feature previously got _feat_history_size = 0, so
+    // _update_features's `_feat_history.size() == _feat_history_size` guard
+    // fired true on an EMPTY deque the moment a feature arrived, calling
+    // pop_front() on it — undefined behaviour. A bare `!_feat_history.empty()`
+    // guard was considered and rejected: it would never pop, letting a
+    // long-lived feature-less-born track's history grow unbounded.
+    _feat_history_size = feat_history_size;
+
     if (feat)
     {
-        _feat_history_size = feat_history_size;
         _update_features(std::make_shared<FeatureVector>(feat.value()));
     }
     else
     {
         curr_feat = nullptr;
         smooth_feat = nullptr;
-        _feat_history_size = 0;
     }
 
     _update_class_id(class_id, score);

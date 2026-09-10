@@ -145,3 +145,35 @@ CostMatrix fuse_iou_with_emb(CostMatrix &iou_dist, CostMatrix &emb_dist,
  * @return AssociationData Association data
  */
 AssociationData linear_assignment(CostMatrix &cost_matrix, float thresh);
+
+/**
+ * @brief Tracks seen with no ReID embedding, cumulative.
+ *
+ * Counted once per embedding_distance() call per entity, not once per
+ * candidate pair. A non-zero value has one producer: a track born from a
+ * feature-less detection (i.e. born on a frame whose class ran
+ * motion-only). activate() keeps the null smooth_feat it starts
+ * with, and only update() or re_activate() ever fill it, each time from a
+ * featured match. Tracks are counted at most once per frame per tracker
+ * instance — the first association's track pool and the unconfirmed-tracks
+ * pass draw from disjoint track sets. Appearance matching is on or off per
+ * frame and per class (by the shape of the embeddings the host passes),
+ * not a global setting, so a zero here is not evidence that nothing is
+ * missing.
+ */
+std::uint64_t null_embedding_tracks();
+
+/**
+ * @brief Detections seen with no ReID embedding, cumulative.
+ *
+ * Counted once per embedding_distance() call per entity, not once per
+ * candidate pair. A detection is feature-less only when appearance
+ * matching is off for its class and frame, and in that case
+ * BoTSORT::track never calls embedding_distance() at all — the condition
+ * that would produce a null here is the same condition that stops this
+ * counter from being reached, so it cannot move through BoTSORT::track.
+ * Low-confidence detections never reach embedding_distance() either, so
+ * they are never counted. A zero here is not evidence that nothing is
+ * missing.
+ */
+std::uint64_t null_embedding_detections();
