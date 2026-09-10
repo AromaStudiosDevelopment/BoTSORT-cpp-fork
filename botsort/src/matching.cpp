@@ -1,5 +1,7 @@
 #include "matching.h"
 
+#include <atomic>
+#include <cstdint>
 #include <limits>
 
 #include "DataType.h"
@@ -64,6 +66,23 @@ CostMatrix iou_distance(const std::vector<std::shared_ptr<Track>> &tracks,
     return cost_matrix;
 }
 
+namespace
+{
+/// Pairs whose appearance cost was suppressed because an embedding was absent.
+///
+/// The guard below makes the crash survivable and HIDES the question it was
+/// hiding before: why does a track or detection reach appearance matching with
+/// no embedding at all? Without a count we would trade a segfault for a
+/// silence, which is a worse trade than it looks — a silent discard elsewhere
+/// in this project went unnoticed for four months.
+std::atomic<std::uint64_t> g_null_embedding_skips{0};
+}  // namespace
+
+std::uint64_t null_embedding_skips()
+{
+    return g_null_embedding_skips.load(std::memory_order_relaxed);
+}
+
 std::tuple<CostMatrix, CostMatrix>
 embedding_distance(const std::vector<std::shared_ptr<Track>> &tracks,
                    const std::vector<std::shared_ptr<Track>> &detections,
@@ -95,7 +114,32 @@ embedding_distance(const std::vector<std::shared_ptr<Track>> &tracks,
         {
             for (int j = 0; j < num_detections; j++)
             {
-                if (distance_metric == "euclidean")
+                // A track or detection can reach appearance matching with no
+                // embedding allocated, and both of these are smart pointers
+                // that were dereferenced unconditionally — a null read of a
+                // 512-float buffer. Four segfaults in two days, always at this
+                // instruction, at a DIFFERENT frame each time; a rare per-pair
+                // condition with no reason to prefer any frame.
+                //
+                // 1.0F is not a chosen policy, it is how this file already
+                // spells "no appearance evidence for this pair": fuse_iou_with_emb
+                // assigns exactly 1.0F when the IoU mask fires or the embedding
+                // mask fires, then fuses with std::min(iou, emb). Under min() a
+                // 1.0 embedding contributes nothing and the pair is decided on
+                // motion alone — behaviourally identical to the whole-matrix
+                // "embedding distance is not available" path in the same
+                // function. Falling through (rather than `continue`) lets the
+                // existing threshold line below set the mask, since 1.0 exceeds
+                // any sane max_embedding_distance.
+                const bool have_embeddings =
+                        tracks[i]->smooth_feat && detections[j]->curr_feat;
+
+                if (!have_embeddings)
+                {
+                    ++g_null_embedding_skips;
+                    cost_matrix(i, j) = 1.0F;
+                }
+                else if (distance_metric == "euclidean")
                     cost_matrix(i, j) = std::max(
                             0.0f, euclidean_distance(tracks[i]->smooth_feat,
                                                      detections[j]->curr_feat));

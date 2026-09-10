@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <cstdint>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -44,6 +45,21 @@ CostMatrix iou_distance(const std::vector<std::shared_ptr<Track>> &tracks,
  * @param distance_metric Distance metric to use for calculating the embedding distance
  * @return std::tuple<CostMatrix, CostMatrix> Tuple of embedding distance cost matrix and embedding distance mask
  */
+/**
+ * @brief Pairs whose appearance cost was suppressed because an embedding was
+ *        absent on the track or the detection.
+ *
+ * `embedding_distance` dereferenced `smooth_feat` and `curr_feat` without a
+ * null check, which segfaulted on a 512-float read. The guard scores such a
+ * pair 1.0 — this file's existing value for "no appearance evidence", fused
+ * with std::min so the pair is decided on IoU alone. Monotonic, process-wide,
+ * never reset; read it as a rate against frames, not as a level.
+ *
+ * Non-zero means something upstream is producing tracks or detections with no
+ * embedding, which the guard does NOT fix.
+ */
+std::uint64_t null_embedding_skips();
+
 std::tuple<CostMatrix, CostMatrix>
 embedding_distance(const std::vector<std::shared_ptr<Track>> &tracks,
                    const std::vector<std::shared_ptr<Track>> &detections,
