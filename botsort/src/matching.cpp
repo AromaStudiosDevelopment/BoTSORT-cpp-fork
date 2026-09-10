@@ -131,12 +131,11 @@ embedding_distance(const std::vector<std::shared_ptr<Track>> &tracks,
         // g_null_embedding_skips once per (track, detection) PAIR, so a single
         // feature-less track in a busy frame inflates it by the detection
         // count. These two passes answer the question the counter exists for:
-        // a track-side null is either a track born from a feature-less
-        // detection (activate() keeps the null smooth_feat, and updates only
-        // fill it from a featured match) or one produced elsewhere without a
-        // feature — these counters alone cannot tell the two apart. A
-        // detection-side null means the host supplied no embedding for that
-        // detection. O(n+m), no set required.
+        // a track-side null has one producer — a track born from a
+        // feature-less detection keeps the null smooth_feat that activate()
+        // gave it; only update() and re_activate() ever fill it, from a
+        // featured match. A detection-side null means the host supplied no
+        // embedding for that detection. O(n+m), no set required.
         for (size_t i = 0; i < num_tracks; i++)
         {
             if (!tracks[i]->smooth_feat) ++g_null_embedding_tracks;
