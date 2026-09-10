@@ -145,3 +145,20 @@ CostMatrix fuse_iou_with_emb(CostMatrix &iou_dist, CostMatrix &emb_dist,
  * @return AssociationData Association data
  */
 AssociationData linear_assignment(CostMatrix &cost_matrix, float thresh);
+
+/**
+ * @brief Tracks seen with no ReID embedding, cumulative.
+ *
+ * Counted once per embedding_distance() call per entity, not once per
+ * candidate pair. A non-zero value means something upstream is placing
+ * tracks into appearance matching with no feature allocated.
+ */
+std::uint64_t null_embedding_tracks();
+
+/**
+ * @brief Detections seen with no ReID embedding, cumulative.
+ *
+ * Counted once per embedding_distance() call per entity, not once per
+ * candidate pair.
+ */
+std::uint64_t null_embedding_detections();

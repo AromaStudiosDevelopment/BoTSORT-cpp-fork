@@ -76,11 +76,28 @@ namespace
 /// silence, which is a worse trade than it looks — a silent discard elsewhere
 /// in this project went unnoticed for four months.
 std::atomic<std::uint64_t> g_null_embedding_skips{0};
+
+/// TRACKS seen with no embedding, counted once per embedding_distance()
+/// call per entity, not once per candidate pair.
+std::atomic<std::uint64_t> g_null_embedding_tracks{0};
+
+/// DETECTIONS seen with no embedding, same accounting.
+std::atomic<std::uint64_t> g_null_embedding_detections{0};
 }  // namespace
 
 std::uint64_t null_embedding_skips()
 {
     return g_null_embedding_skips.load(std::memory_order_relaxed);
+}
+
+std::uint64_t null_embedding_tracks()
+{
+    return g_null_embedding_tracks.load(std::memory_order_relaxed);
+}
+
+std::uint64_t null_embedding_detections()
+{
+    return g_null_embedding_detections.load(std::memory_order_relaxed);
 }
 
 std::tuple<CostMatrix, CostMatrix>
@@ -110,6 +127,22 @@ embedding_distance(const std::vector<std::shared_ptr<Track>> &tracks,
 
     if (num_tracks > 0 && num_detections > 0)
     {
+        // Entity counts, not pair counts. The double loop below increments
+        // g_null_embedding_skips once per (track, detection) PAIR, so a single
+        // feature-less track in a busy frame inflates it by the detection
+        // count. These two passes answer the question the counter exists for:
+        // a track-side null implicates resurrection or stitching producing
+        // feature-less tracks; a detection-side null implicates the crop or
+        // OSNet. O(n+m), no set required.
+        for (size_t i = 0; i < num_tracks; i++)
+        {
+            if (!tracks[i]->smooth_feat) ++g_null_embedding_tracks;
+        }
+        for (size_t j = 0; j < num_detections; j++)
+        {
+            if (!detections[j]->curr_feat) ++g_null_embedding_detections;
+        }
+
         for (int i = 0; i < num_tracks; i++)
         {
             for (int j = 0; j < num_detections; j++)
