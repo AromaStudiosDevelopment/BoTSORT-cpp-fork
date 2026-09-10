@@ -151,7 +151,8 @@ AssociationData linear_assignment(CostMatrix &cost_matrix, float thresh);
  *
  * Counted once per embedding_distance() call per entity, not once per
  * candidate pair. A non-zero value has one producer: a track born from a
- * feature-less detection. activate() keeps the null smooth_feat it starts
+ * feature-less detection (i.e. born on a frame whose class ran
+ * motion-only). activate() keeps the null smooth_feat it starts
  * with, and only update() or re_activate() ever fill it, each time from a
  * featured match. Tracks are counted at most once per frame per tracker
  * instance — the first association's track pool and the unconfirmed-tracks

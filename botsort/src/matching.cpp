@@ -134,8 +134,11 @@ embedding_distance(const std::vector<std::shared_ptr<Track>> &tracks,
         // a track-side null has one producer — a track born from a
         // feature-less detection keeps the null smooth_feat that activate()
         // gave it; only update() and re_activate() ever fill it, from a
-        // featured match. A detection-side null means the host supplied no
-        // embedding for that detection. O(n+m), no set required.
+        // featured match. A detection-side null can't occur through
+        // BoTSORT::track: a detection is feature-less only when appearance
+        // matching is off for its class and frame, and then this function
+        // isn't called — only direct callers can move that counter.
+        // O(n+m), no set required.
         for (size_t i = 0; i < num_tracks; i++)
         {
             if (!tracks[i]->smooth_feat) ++g_null_embedding_tracks;
